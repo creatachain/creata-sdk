@@ -1,0 +1,549 @@
+package types_test
+
+import (
+	"time"
+
+	tmtypes "github.com/creatachain/augusteum/types"
+
+	client "github.com/creatachain/creata-sdk/x/icp/core/02-client"
+	"github.com/creatachain/creata-sdk/x/icp/core/02-client/types"
+	channeltypes "github.com/creatachain/creata-sdk/x/icp/core/04-channel/types"
+	commitmenttypes "github.com/creatachain/creata-sdk/x/icp/core/23-commitment/types"
+	"github.com/creatachain/creata-sdk/x/icp/core/exported"
+	icptmtypes "github.com/creatachain/creata-sdk/x/icp/light-clients/07-augusteum/types"
+	localhosttypes "github.com/creatachain/creata-sdk/x/icp/light-clients/09-localhost/types"
+	icptesting "github.com/creatachain/creata-sdk/x/icp/testing"
+	icptestingmock "github.com/creatachain/creata-sdk/x/icp/testing/mock"
+)
+
+const (
+	chainID         = "chainID"
+	tmClientID0     = "07-augusteum-0"
+	tmClientID1     = "07-augusteum-1"
+	invalidClientID = "myclient-0"
+	clientID        = tmClientID0
+
+	height = 10
+)
+
+var clientHeight = types.NewHeight(0, 10)
+
+func (suite *TypesTestSuite) TestMarshalGenesisState() {
+	cdc := suite.chainA.App.AppCodec()
+	clientA, _, _, _, _, _ := suite.coordinator.Setup(suite.chainA, suite.chainB, channeltypes.ORDERED)
+	suite.coordinator.UpdateClient(suite.chainA, suite.chainB, clientA, exported.Augusteum)
+
+	genesis := client.ExportGenesis(suite.chainA.GetContext(), suite.chainA.App.ICPKeeper.ClientKeeper)
+
+	bz, err := cdc.MarshalJSON(&genesis)
+	suite.Require().NoError(err)
+	suite.Require().NotNil(bz)
+
+	var gs types.GenesisState
+	err = cdc.UnmarshalJSON(bz, &gs)
+	suite.Require().NoError(err)
+}
+
+func (suite *TypesTestSuite) TestValidateGenesis() {
+	privVal := icptestingmock.NewPV()
+	pubKey, err := privVal.GetPubKey()
+	suite.Require().NoError(err)
+
+	now := time.Now().UTC()
+
+	val := tmtypes.NewValidator(pubKey, 10)
+	valSet := tmtypes.NewValidatorSet([]*tmtypes.Validator{val})
+
+	heightMinus1 := types.NewHeight(0, height-1)
+	header := suite.chainA.CreateTMClientHeader(chainID, int64(clientHeight.RevisionHeight), heightMinus1, now, valSet, valSet, []tmtypes.PrivValidator{privVal})
+
+	testCases := []struct {
+		name     string
+		genState types.GenesisState
+		expPass  bool
+	}{
+		{
+			name:     "default",
+			genState: types.DefaultGenesisState(),
+			expPass:  true,
+		},
+		{
+			name: "valid custom genesis",
+			genState: types.NewGenesisState(
+				[]types.IdentifiedClientState{
+					types.NewIdentifiedClientState(
+						tmClientID0, icptmtypes.NewClientState(chainID, icptesting.DefaultTrustLevel, icptesting.TrustingPeriod, icptesting.UnbondingPeriod, icptesting.MaxClockDrift, clientHeight, commitmenttypes.GetSDKSpecs(), icptesting.UpgradePath, false, false),
+					),
+					types.NewIdentifiedClientState(
+						exported.Localhost+"-1", localhosttypes.NewClientState("chainID", clientHeight),
+					),
+				},
+				[]types.ClientConsensusStates{
+					types.NewClientConsensusStates(
+						tmClientID0,
+						[]types.ConsensusStateWithHeight{
+							types.NewConsensusStateWithHeight(
+								header.GetHeight().(types.Height),
+								icptmtypes.NewConsensusState(
+									header.GetTime(), commitmenttypes.NewMerkleRoot(header.Header.GetAppHash()), header.Header.NextValidatorsHash,
+								),
+							),
+						},
+					),
+				},
+				[]types.IdentifiedGenesisMetadata{
+					types.NewIdentifiedGenesisMetadata(
+						clientID,
+						[]types.GenesisMetadata{
+							types.NewGenesisMetadata([]byte("key1"), []byte("val1")),
+							types.NewGenesisMetadata([]byte("key2"), []byte("val2")),
+						},
+					),
+				},
+				types.NewParams(exported.Augusteum, exported.Localhost),
+				false,
+				2,
+			),
+			expPass: true,
+		},
+		{
+			name: "invalid clientid",
+			genState: types.NewGenesisState(
+				[]types.IdentifiedClientState{
+					types.NewIdentifiedClientState(
+						invalidClientID, icptmtypes.NewClientState(chainID, icptmtypes.DefaultTrustLevel, icptesting.TrustingPeriod, icptesting.UnbondingPeriod, icptesting.MaxClockDrift, clientHeight, commitmenttypes.GetSDKSpecs(), icptesting.UpgradePath, false, false),
+					),
+					types.NewIdentifiedClientState(
+						exported.Localhost, localhosttypes.NewClientState("chainID", clientHeight),
+					),
+				},
+				[]types.ClientConsensusStates{
+					types.NewClientConsensusStates(
+						invalidClientID,
+						[]types.ConsensusStateWithHeight{
+							types.NewConsensusStateWithHeight(
+								header.GetHeight().(types.Height),
+								icptmtypes.NewConsensusState(
+									header.GetTime(), commitmenttypes.NewMerkleRoot(header.Header.GetAppHash()), header.Header.NextValidatorsHash,
+								),
+							),
+						},
+					),
+				},
+				nil,
+				types.NewParams(exported.Augusteum),
+				false,
+				0,
+			),
+			expPass: false,
+		},
+		{
+			name: "invalid client",
+			genState: types.NewGenesisState(
+				[]types.IdentifiedClientState{
+					types.NewIdentifiedClientState(
+						tmClientID0, icptmtypes.NewClientState(chainID, icptmtypes.DefaultTrustLevel, icptesting.TrustingPeriod, icptesting.UnbondingPeriod, icptesting.MaxClockDrift, clientHeight, commitmenttypes.GetSDKSpecs(), icptesting.UpgradePath, false, false),
+					),
+					types.NewIdentifiedClientState(exported.Localhost, localhosttypes.NewClientState("chaindID", types.ZeroHeight())),
+				},
+				nil,
+				nil,
+				types.NewParams(exported.Augusteum),
+				false,
+				0,
+			),
+			expPass: false,
+		},
+		{
+			name: "consensus state client id does not match client id in genesis clients",
+			genState: types.NewGenesisState(
+				[]types.IdentifiedClientState{
+					types.NewIdentifiedClientState(
+						tmClientID0, icptmtypes.NewClientState(chainID, icptmtypes.DefaultTrustLevel, icptesting.TrustingPeriod, icptesting.UnbondingPeriod, icptesting.MaxClockDrift, clientHeight, commitmenttypes.GetSDKSpecs(), icptesting.UpgradePath, false, false),
+					),
+					types.NewIdentifiedClientState(
+						exported.Localhost, localhosttypes.NewClientState("chaindID", clientHeight),
+					),
+				},
+				[]types.ClientConsensusStates{
+					types.NewClientConsensusStates(
+						tmClientID1,
+						[]types.ConsensusStateWithHeight{
+							types.NewConsensusStateWithHeight(
+								types.NewHeight(0, 1),
+								icptmtypes.NewConsensusState(
+									header.GetTime(), commitmenttypes.NewMerkleRoot(header.Header.GetAppHash()), header.Header.NextValidatorsHash,
+								),
+							),
+						},
+					),
+				},
+				nil,
+				types.NewParams(exported.Augusteum),
+				false,
+				0,
+			),
+			expPass: false,
+		},
+		{
+			name: "invalid consensus state height",
+			genState: types.NewGenesisState(
+				[]types.IdentifiedClientState{
+					types.NewIdentifiedClientState(
+						tmClientID0, icptmtypes.NewClientState(chainID, icptmtypes.DefaultTrustLevel, icptesting.TrustingPeriod, icptesting.UnbondingPeriod, icptesting.MaxClockDrift, clientHeight, commitmenttypes.GetSDKSpecs(), icptesting.UpgradePath, false, false),
+					),
+					types.NewIdentifiedClientState(
+						exported.Localhost, localhosttypes.NewClientState("chaindID", clientHeight),
+					),
+				},
+				[]types.ClientConsensusStates{
+					types.NewClientConsensusStates(
+						tmClientID0,
+						[]types.ConsensusStateWithHeight{
+							types.NewConsensusStateWithHeight(
+								types.ZeroHeight(),
+								icptmtypes.NewConsensusState(
+									header.GetTime(), commitmenttypes.NewMerkleRoot(header.Header.GetAppHash()), header.Header.NextValidatorsHash,
+								),
+							),
+						},
+					),
+				},
+				nil,
+				types.NewParams(exported.Augusteum),
+				false,
+				0,
+			),
+			expPass: false,
+		},
+		{
+			name: "invalid consensus state",
+			genState: types.NewGenesisState(
+				[]types.IdentifiedClientState{
+					types.NewIdentifiedClientState(
+						tmClientID0, icptmtypes.NewClientState(chainID, icptmtypes.DefaultTrustLevel, icptesting.TrustingPeriod, icptesting.UnbondingPeriod, icptesting.MaxClockDrift, clientHeight, commitmenttypes.GetSDKSpecs(), icptesting.UpgradePath, false, false),
+					),
+					types.NewIdentifiedClientState(
+						exported.Localhost, localhosttypes.NewClientState("chaindID", clientHeight),
+					),
+				},
+				[]types.ClientConsensusStates{
+					types.NewClientConsensusStates(
+						tmClientID0,
+						[]types.ConsensusStateWithHeight{
+							types.NewConsensusStateWithHeight(
+								types.NewHeight(0, 1),
+								icptmtypes.NewConsensusState(
+									time.Time{}, commitmenttypes.NewMerkleRoot(header.Header.GetAppHash()), header.Header.NextValidatorsHash,
+								),
+							),
+						},
+					),
+				},
+				nil,
+				types.NewParams(exported.Augusteum),
+				false,
+				0,
+			),
+			expPass: false,
+		},
+		{
+			name: "client in genesis clients is disallowed by params",
+			genState: types.NewGenesisState(
+				[]types.IdentifiedClientState{
+					types.NewIdentifiedClientState(
+						tmClientID0, icptmtypes.NewClientState(chainID, icptesting.DefaultTrustLevel, icptesting.TrustingPeriod, icptesting.UnbondingPeriod, icptesting.MaxClockDrift, clientHeight, commitmenttypes.GetSDKSpecs(), icptesting.UpgradePath, false, false),
+					),
+					types.NewIdentifiedClientState(
+						exported.Localhost, localhosttypes.NewClientState("chainID", clientHeight),
+					),
+				},
+				[]types.ClientConsensusStates{
+					types.NewClientConsensusStates(
+						tmClientID0,
+						[]types.ConsensusStateWithHeight{
+							types.NewConsensusStateWithHeight(
+								header.GetHeight().(types.Height),
+								icptmtypes.NewConsensusState(
+									header.GetTime(), commitmenttypes.NewMerkleRoot(header.Header.GetAppHash()), header.Header.NextValidatorsHash,
+								),
+							),
+						},
+					),
+				},
+				nil,
+				types.NewParams(exported.Solomachine),
+				false,
+				0,
+			),
+			expPass: false,
+		},
+		{
+			name: "metadata client-id does not match a genesis client",
+			genState: types.NewGenesisState(
+				[]types.IdentifiedClientState{
+					types.NewIdentifiedClientState(
+						clientID, icptmtypes.NewClientState(chainID, icptesting.DefaultTrustLevel, icptesting.TrustingPeriod, icptesting.UnbondingPeriod, icptesting.MaxClockDrift, clientHeight, commitmenttypes.GetSDKSpecs(), icptesting.UpgradePath, false, false),
+					),
+					types.NewIdentifiedClientState(
+						exported.Localhost, localhosttypes.NewClientState("chainID", clientHeight),
+					),
+				},
+				[]types.ClientConsensusStates{
+					types.NewClientConsensusStates(
+						clientID,
+						[]types.ConsensusStateWithHeight{
+							types.NewConsensusStateWithHeight(
+								header.GetHeight().(types.Height),
+								icptmtypes.NewConsensusState(
+									header.GetTime(), commitmenttypes.NewMerkleRoot(header.Header.GetAppHash()), header.Header.NextValidatorsHash,
+								),
+							),
+						},
+					),
+				},
+				[]types.IdentifiedGenesisMetadata{
+					types.NewIdentifiedGenesisMetadata(
+						"wrongclientid",
+						[]types.GenesisMetadata{
+							types.NewGenesisMetadata([]byte("key1"), []byte("val1")),
+							types.NewGenesisMetadata([]byte("key2"), []byte("val2")),
+						},
+					),
+				},
+				types.NewParams(exported.Augusteum, exported.Localhost),
+				false,
+				0,
+			),
+			expPass: false,
+		},
+		{
+			name: "invalid metadata",
+			genState: types.NewGenesisState(
+				[]types.IdentifiedClientState{
+					types.NewIdentifiedClientState(
+						clientID, icptmtypes.NewClientState(chainID, icptmtypes.DefaultTrustLevel, icptesting.TrustingPeriod, icptesting.UnbondingPeriod, icptesting.MaxClockDrift, clientHeight, commitmenttypes.GetSDKSpecs(), icptesting.UpgradePath, false, false),
+					),
+				},
+				[]types.ClientConsensusStates{
+					types.NewClientConsensusStates(
+						clientID,
+						[]types.ConsensusStateWithHeight{
+							types.NewConsensusStateWithHeight(
+								header.GetHeight().(types.Height),
+								icptmtypes.NewConsensusState(
+									header.GetTime(), commitmenttypes.NewMerkleRoot(header.Header.GetAppHash()), header.Header.NextValidatorsHash,
+								),
+							),
+						},
+					),
+				},
+				[]types.IdentifiedGenesisMetadata{
+					types.NewIdentifiedGenesisMetadata(
+						clientID,
+						[]types.GenesisMetadata{
+							types.NewGenesisMetadata([]byte(""), []byte("val1")),
+							types.NewGenesisMetadata([]byte("key2"), []byte("val2")),
+						},
+					),
+				},
+				types.NewParams(exported.Augusteum),
+				false,
+				0,
+			),
+		},
+		{
+			name: "invalid params",
+			genState: types.NewGenesisState(
+				[]types.IdentifiedClientState{
+					types.NewIdentifiedClientState(
+						tmClientID0, icptmtypes.NewClientState(chainID, icptesting.DefaultTrustLevel, icptesting.TrustingPeriod, icptesting.UnbondingPeriod, icptesting.MaxClockDrift, clientHeight, commitmenttypes.GetSDKSpecs(), icptesting.UpgradePath, false, false),
+					),
+					types.NewIdentifiedClientState(
+						exported.Localhost, localhosttypes.NewClientState("chainID", clientHeight),
+					),
+				},
+				[]types.ClientConsensusStates{
+					types.NewClientConsensusStates(
+						tmClientID0,
+						[]types.ConsensusStateWithHeight{
+							types.NewConsensusStateWithHeight(
+								header.GetHeight().(types.Height),
+								icptmtypes.NewConsensusState(
+									header.GetTime(), commitmenttypes.NewMerkleRoot(header.Header.GetAppHash()), header.Header.NextValidatorsHash,
+								),
+							),
+						},
+					),
+				},
+				nil,
+				types.NewParams(" "),
+				false,
+				0,
+			),
+			expPass: false,
+		},
+		{
+			name: "invalid param",
+			genState: types.NewGenesisState(
+				[]types.IdentifiedClientState{
+					types.NewIdentifiedClientState(
+						tmClientID0, icptmtypes.NewClientState(chainID, icptesting.DefaultTrustLevel, icptesting.TrustingPeriod, icptesting.UnbondingPeriod, icptesting.MaxClockDrift, clientHeight, commitmenttypes.GetSDKSpecs(), icptesting.UpgradePath, false, false),
+					),
+					types.NewIdentifiedClientState(
+						exported.Localhost, localhosttypes.NewClientState("chainID", clientHeight),
+					),
+				},
+				[]types.ClientConsensusStates{
+					types.NewClientConsensusStates(
+						tmClientID0,
+						[]types.ConsensusStateWithHeight{
+							types.NewConsensusStateWithHeight(
+								header.GetHeight().(types.Height),
+								icptmtypes.NewConsensusState(
+									header.GetTime(), commitmenttypes.NewMerkleRoot(header.Header.GetAppHash()), header.Header.NextValidatorsHash,
+								),
+							),
+						},
+					),
+				},
+				nil,
+				types.NewParams(" "),
+				true,
+				0,
+			),
+			expPass: false,
+		},
+		{
+			name: "localhost client not registered on allowlist",
+			genState: types.NewGenesisState(
+				[]types.IdentifiedClientState{
+					types.NewIdentifiedClientState(
+						tmClientID1, icptmtypes.NewClientState(chainID, icptesting.DefaultTrustLevel, icptesting.TrustingPeriod, icptesting.UnbondingPeriod, icptesting.MaxClockDrift, clientHeight, commitmenttypes.GetSDKSpecs(), icptesting.UpgradePath, false, false),
+					),
+					types.NewIdentifiedClientState(
+						exported.Localhost+"-0", localhosttypes.NewClientState("chainID", clientHeight),
+					),
+				},
+				[]types.ClientConsensusStates{
+					types.NewClientConsensusStates(
+						tmClientID1,
+						[]types.ConsensusStateWithHeight{
+							types.NewConsensusStateWithHeight(
+								header.GetHeight().(types.Height),
+								icptmtypes.NewConsensusState(
+									header.GetTime(), commitmenttypes.NewMerkleRoot(header.Header.GetAppHash()), header.Header.NextValidatorsHash,
+								),
+							),
+						},
+					),
+				},
+				nil,
+				types.NewParams(exported.Augusteum),
+				true,
+				2,
+			),
+			expPass: false,
+		},
+		{
+			name: "next sequence too small",
+			genState: types.NewGenesisState(
+				[]types.IdentifiedClientState{
+					types.NewIdentifiedClientState(
+						tmClientID0, icptmtypes.NewClientState(chainID, icptesting.DefaultTrustLevel, icptesting.TrustingPeriod, icptesting.UnbondingPeriod, icptesting.MaxClockDrift, clientHeight, commitmenttypes.GetSDKSpecs(), icptesting.UpgradePath, false, false),
+					),
+					types.NewIdentifiedClientState(
+						exported.Localhost+"-1", localhosttypes.NewClientState("chainID", clientHeight),
+					),
+				},
+				[]types.ClientConsensusStates{
+					types.NewClientConsensusStates(
+						tmClientID0,
+						[]types.ConsensusStateWithHeight{
+							types.NewConsensusStateWithHeight(
+								header.GetHeight().(types.Height),
+								icptmtypes.NewConsensusState(
+									header.GetTime(), commitmenttypes.NewMerkleRoot(header.Header.GetAppHash()), header.Header.NextValidatorsHash,
+								),
+							),
+						},
+					),
+				},
+				nil,
+				types.NewParams(exported.Augusteum, exported.Localhost),
+				false,
+				0,
+			),
+			expPass: false,
+		},
+		{
+			name: "failed to parse client identifier in client state loop",
+			genState: types.NewGenesisState(
+				[]types.IdentifiedClientState{
+					types.NewIdentifiedClientState(
+						"my-client", icptmtypes.NewClientState(chainID, icptesting.DefaultTrustLevel, icptesting.TrustingPeriod, icptesting.UnbondingPeriod, icptesting.MaxClockDrift, clientHeight, commitmenttypes.GetSDKSpecs(), icptesting.UpgradePath, false, false),
+					),
+					types.NewIdentifiedClientState(
+						exported.Localhost+"-1", localhosttypes.NewClientState("chainID", clientHeight),
+					),
+				},
+				[]types.ClientConsensusStates{
+					types.NewClientConsensusStates(
+						tmClientID0,
+						[]types.ConsensusStateWithHeight{
+							types.NewConsensusStateWithHeight(
+								header.GetHeight().(types.Height),
+								icptmtypes.NewConsensusState(
+									header.GetTime(), commitmenttypes.NewMerkleRoot(header.Header.GetAppHash()), header.Header.NextValidatorsHash,
+								),
+							),
+						},
+					),
+				},
+				nil,
+				types.NewParams(exported.Augusteum, exported.Localhost),
+				false,
+				5,
+			),
+			expPass: false,
+		},
+		{
+			name: "consensus state different than client state type",
+			genState: types.NewGenesisState(
+				[]types.IdentifiedClientState{
+					types.NewIdentifiedClientState(
+						exported.Localhost+"-1", localhosttypes.NewClientState("chainID", clientHeight),
+					),
+				},
+				[]types.ClientConsensusStates{
+					types.NewClientConsensusStates(
+						exported.Localhost+"-1",
+						[]types.ConsensusStateWithHeight{
+							types.NewConsensusStateWithHeight(
+								header.GetHeight().(types.Height),
+								icptmtypes.NewConsensusState(
+									header.GetTime(), commitmenttypes.NewMerkleRoot(header.Header.GetAppHash()), header.Header.NextValidatorsHash,
+								),
+							),
+						},
+					),
+				},
+				nil,
+				types.NewParams(exported.Augusteum, exported.Localhost),
+				false,
+				5,
+			),
+			expPass: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		err := tc.genState.Validate()
+		if tc.expPass {
+			suite.Require().NoError(err, tc.name)
+		} else {
+			suite.Require().Error(err, tc.name)
+		}
+	}
+}
